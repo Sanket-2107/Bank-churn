@@ -1,88 +1,105 @@
-import streamlit as st
+import json
+import joblib
+import numpy as np
 import pandas as pd
-import pickle
+import streamlit as st
 
-# Load the scaler and model
-with open('scaler.pkl', 'rb') as f:
-    scaler = pickle.load(f)
+# ---------- Load artifacts ----------
+@st.cache_resource
+def load_artifacts():
+    model = joblib.load("bank_churn_model.pkl")
+    scaler = joblib.load("scaler.pkl")
+    with open("feature_columns.json", "r") as f:
+        feature_cols = json.load(f)
+    return model, scaler, feature_cols
 
-with open('model.pkl', 'rb') as f:
-    model = pickle.load(f)
+model, scaler, feature_cols = load_artifacts()
 
-# Define the prediction function
-def predict_churn(credit_score, country, gender, age, tenure, balance, products_number, credit_card, active_member, estimated_salary):
-    # Create a DataFrame with the same columns and order as the training data
-    data = {'credit_score': [credit_score],
-            'country': [country],
-            'gender': [gender],
-            'age': [age],
-            'tenure': [tenure],
-            'balance': [balance],
-            'products_number': [products_number],
-            'credit_card': [credit_card],
-            'active_member': [active_member],
-            'estimated_salary': [estimated_salary]}
-    df = pd.DataFrame(data)
+st.set_page_config(page_title="Bank Churn Predictor", page_icon="🏦", layout="centered")
+st.title("🏦 Bank Customer Churn Predictor")
+st.write("Enter customer details to estimate churn probability.")
 
-    # Apply one-hot encoding (must match the training data)
-    df = pd.get_dummies(df, columns=['country', 'gender'], drop_first=True)
+# ---------- Input form ----------
+with st.form("input_form"):
+    col1, col2 = st.columns(2)
 
-    # Ensure all columns from training data are present, fill missing with 0
-    # This step is crucial if new data might not have all categories from training
-    # For simplicity in this example, we assume all categories are present in the input form.
-    # In a real application, you'd need to handle this more robustly.
-    # For now, we'll just scale the available columns.
+    with col1:
+        credit_score = st.number_input("Credit Score", min_value=0, max_value=1000, value=650, step=1)
+        country = st.selectbox("Country", ["France", "Germany", "Spain"])
+        gender = st.selectbox("Gender", ["Female", "Male"])
+        age = st.number_input("Age", min_value=18, max_value=120, value=40, step=1)
+        tenure = st.number_input("Tenure (years with bank)", min_value=0, max_value=50, value=5, step=1)
 
-    # Select and order columns to match the training data before scaling
-    # Based on the training data, the columns after one-hot encoding and dropping customer_id were:
-    # 'credit_score', 'age', 'tenure', 'balance', 'products_number', 'credit_card', 'active_member', 'estimated_salary', 'country_Germany', 'country_Spain', 'gender_Male'
-    
-    # Create a dictionary to hold the data with all possible columns
-    processed_data = {}
-    for col in ['credit_score', 'age', 'tenure', 'balance', 'products_number', 'credit_card', 'active_member', 'estimated_salary']:
-        processed_data[col] = df[col].iloc[0]
+    with col2:
+        balance = st.number_input("Balance", min_value=0.0, value=50000.0, step=100.0, format="%.2f")
+        products_number = st.number_input("Number of Products", min_value=1, max_value=10, value=2, step=1)
+        credit_card = st.selectbox("Has Credit Card?", ["No", "Yes"])
+        active_member = st.selectbox("Active Member?", ["No", "Yes"])
+        estimated_salary = st.number_input("Estimated Salary", min_value=0.0, value=100000.0, step=100.0, format="%.2f")
 
-    # Handle one-hot encoded columns - ensure they exist and are in the correct order
-    for country_col in ['country_Germany', 'country_Spain']:
-        processed_data[country_col] = df.get(country_col, 0).iloc[0] # Use .get() with default 0
+    threshold = st.slider("Decision Threshold (churn if prob ≥ threshold)", 0.0, 1.0, 0.5, 0.01)
 
-    for gender_col in ['gender_Male']:
-         processed_data[gender_col] = df.get(gender_col, 0).iloc[0] # Use .get() with default 0
+    submitted = st.form_submit_button("Predict")
 
-    # Convert the dictionary to a DataFrame with explicit column order
-    processed_df = pd.DataFrame([processed_data], columns=['credit_score', 'age', 'tenure', 'balance', 'products_number', 'credit_card', 'active_member', 'estimated_salary', 'country_Germany', 'country_Spain', 'gender_Male'])
+# ---------- Preprocessing helper ----------
+def preprocess_single_row(
+    credit_score, country, gender, age, tenure, balance,
+    products_number, credit_card, active_member, estimated_salary,
+    feature_cols
+):
+    # Base dict (raw features before dummies)
+    row = {
+        "credit_score": credit_score,
+        "gender": 1 if gender == "Male" else 0,            # Male=1, Female=0
+        "age": age,
+        "tenure": tenure,
+        "balance": balance,
+        "products_number": products_number,
+        "credit_card": 1 if credit_card == "Yes" else 0,
+        "active_member": 1 if active_member == "Yes" else 0,
+        "estimated_salary": estimated_salary,
+        "country": country
+    }
 
+    df = pd.DataFrame([row])
 
-    # Scale the numerical features
-    scaled_data = scaler.transform(processed_df)
-    scaled_df = pd.DataFrame(scaled_data, columns=processed_df.columns)
+    # One-hot encode country with drop_first=True (France as base in training)
+    df = pd.get_dummies(df, columns=["country"], drop_first=True)
+    # Ensure expected dummy columns exist; add missing with 0
+    for col in ["country_Germany", "country_Spain"]:
+        if col not in df.columns:
+            df[col] = 0
 
+    # Arrange columns to match training (feature_cols)
+    df = df.reindex(columns=feature_cols, fill_value=0)
 
-    # Make prediction
-    prediction = model.predict(scaled_df)
-    return prediction[0]
+    return df
 
-# Streamlit App
-st.title("Bank Customer Churn Prediction")
+# ---------- Predict ----------
+if submitted:
+    X = preprocess_single_row(
+        credit_score, country, gender, age, tenure, balance,
+        products_number, credit_card, active_member, estimated_salary,
+        feature_cols
+    )
 
-st.write("Enter customer details to predict churn.")
+    # Scale
+    X_scaled = scaler.transform(X)
 
-# Input fields
-credit_score = st.slider("Credit Score", 350, 850, 650)
-country = st.selectbox("Country", ['France', 'Spain', 'Germany'])
-gender = st.selectbox("Gender", ['Female', 'Male'])
-age = st.slider("Age", 18, 92, 38)
-tenure = st.slider("Tenure (years)", 0, 10, 5)
-balance = st.number_input("Balance", value=0.0)
-products_number = st.slider("Number of Products", 1, 4, 1)
-credit_card = st.selectbox("Has Credit Card", [0, 1], format_func=lambda x: 'Yes' if x == 1 else 'No')
-active_member = st.selectbox("Is Active Member", [0, 1], format_func=lambda x: 'Yes' if x == 1 else 'No')
-estimated_salary = st.number_input("Estimated Salary", value=0.0)
+    # Predict proba & class
+    prob = float(model.predict_proba(X_scaled)[:, 1][0])
+    pred = int(prob >= threshold)
 
+    st.subheader("Results")
+    st.metric(label="Churn Probability", value=f"{prob:.3f}")
+    st.metric(label="Prediction", value=("Churn" if pred == 1 else "Stay"))
 
-if st.button("Predict Churn"):
-    result = predict_churn(credit_score, country, gender, age, tenure, balance, products_number, credit_card, active_member, estimated_salary)
-    if result == 1:
-        st.error("This customer is likely to churn.")
+    # Simple guidance
+    if prob >= 0.5:
+        st.info("⚠️ Higher churn risk. Consider cross-sell/retention offers, reach-outs, or service recovery.")
     else:
-        st.success("This customer is likely to stay.")
+        st.success("✅ Lower churn risk. Focus on engagement and product adoption.")
+
+    # Show model inputs (debug)
+    with st.expander("See processed feature vector (debug)"):
+        st.write(pd.DataFrame(X, index=["input_row"]))
